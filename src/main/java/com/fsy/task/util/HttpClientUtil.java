@@ -70,7 +70,7 @@ public class HttpClientUtil {
                 nvps.add(new BasicNameValuePair(entry.getKey().toString() , entry.getValue().toString()));
             }
         }
-        Header header = new BasicHeader("Content-Type","application/x-www-form-urlencoded");
+        Header header = new BasicHeader("Content-Type","application/x-www-form-urlencoded;charset=UTF-8");
 
         //cookie
         if(cookie != null && !cookie.equals("")){
@@ -86,7 +86,7 @@ public class HttpClientUtil {
 
         String respStr = null;
         try {
-            httPost.setEntity(new UrlEncodedFormEntity(nvps));
+            httPost.setEntity(new UrlEncodedFormEntity(nvps ,Charset.forName("UTF-8")));
 
             CloseableHttpResponse response2 = httpclient.execute(httPost);
             Header [] cookies = response2.getHeaders("Set-Cookie");
