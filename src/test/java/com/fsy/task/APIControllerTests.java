@@ -7,4 +7,8 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 
 public class APIControllerTests {
+    @Test
+    public void test(){
+        new APIController("sdnu201715030108" , "ncy1224");
+    }
 }

@@ -1,9 +1,6 @@
-package com.fsy.task.dto.ResultDTO;
+package com.fsy.task.dto;
 
-import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
-import com.fasterxml.jackson.databind.deser.std.StringDeserializer;
 import lombok.*;
 
 @Getter

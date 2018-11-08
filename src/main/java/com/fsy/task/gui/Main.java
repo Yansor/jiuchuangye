@@ -7,13 +7,19 @@ package com.fsy.task.gui;
  */
 
 import com.fsy.task.APIController;
-import com.fsy.task.domain.ImportUser;
+import com.fsy.task.domain.User;
 import com.fsy.task.util.UserImportUtil;
-import org.htmlparser.util.ParserException;
+import org.springframework.util.CollectionUtils;
 
 import javax.swing.*;
 import java.awt.event.ActionEvent;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
+import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
 
 import static javax.swing.JOptionPane.OK_CANCEL_OPTION;
 import static javax.swing.JOptionPane.QUESTION_MESSAGE;
@@ -23,6 +29,19 @@ import static javax.swing.JOptionPane.QUESTION_MESSAGE;
  * @author vincent
  */
 public class Main extends JFrame {
+
+    // Variables declaration - do not modify
+    private JButton importUserButton = new JButton();; //导入账号
+
+    private JButton startButton = new JButton();; //开始按钮
+
+    private List<User> userList;
+
+    DefaultListModel dlm = new DefaultListModel();
+
+    private JList userJList = new JList(dlm) ;
+
+    private JScrollPane scrollPane = new JScrollPane(userJList);
 
     /**
      * Creates new form Main
@@ -39,7 +58,7 @@ public class Main extends JFrame {
     @SuppressWarnings("unchecked")
     // <editor-fold defaultstate="collapsed" desc="Generated Code">
     private void initComponents() {
-        this.setTitle("就创业自动看课软件V1.0 --看视频 , 写测评");
+        this.setTitle("就创业自动看课软件V2.0 --看视频 , 写测评 , 做考试");
         try {
             //make ui more beaut
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
@@ -52,15 +71,26 @@ public class Main extends JFrame {
         } catch (UnsupportedLookAndFeelException e) {
             e.printStackTrace();
         }
-        jButton2 = new JButton();
-        jButton3 = new JButton();
+
         setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
 
-        jButton2.setText("导入学生对应账号");
-        jButton2.addActionListener(new java.awt.event.ActionListener() {
+        importUserButton.setText("导入学生对应账号");
+        importUserButton.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(ActionEvent evt) {
                 try {
                     jButton2ActionPerformed(evt);
+
+                    String [] listDatas = new String[userList.size()];
+                    if(!CollectionUtils.isEmpty(userList)){
+                        int index = 0;
+                        for(User user : userList){
+                            String userPassStr = user.toString();
+                            listDatas[index] = userPassStr;
+                            for(int a = 100 ; a < 125; a++)
+                            dlm.addElement(userPassStr);
+                            index++;
+                        }
+                    }
                 } catch (IOException e) {
                     JOptionPane.showOptionDialog( Main.this , "导入失败 " + e.getMessage() , "通知" , OK_CANCEL_OPTION , QUESTION_MESSAGE , null , null , null);
                     //e.printStackTrace();
@@ -68,8 +98,8 @@ public class Main extends JFrame {
             }
         });
 
-        jButton3.setText("开始");
-        jButton3.addActionListener(new java.awt.event.ActionListener() {
+        startButton.setText("开始");
+        startButton.addActionListener(new java.awt.event.ActionListener() {
             public void actionPerformed(ActionEvent evt) {
                 try {
                     jButton3ActionPerformed(evt);
@@ -78,6 +108,8 @@ public class Main extends JFrame {
                 }
             }
         });
+         scrollPane = new JScrollPane(userJList);
+
         GroupLayout layout = new GroupLayout(getContentPane());
         getContentPane().setLayout(layout);
         layout.setHorizontalGroup(
@@ -85,10 +117,9 @@ public class Main extends JFrame {
                         .addGroup(layout.createSequentialGroup()
                                 .addGap(52, 52, 52)
                                 .addGroup(layout.createParallelGroup(GroupLayout.Alignment.LEADING)
-                                        .addComponent(jButton3)
-                                        //.addComponent(importAnswerB)
-                                        .addComponent(jButton2)
-                                        //.addComponent(jButton1))
+                                        .addComponent(importUserButton)
+                                        .addComponent(scrollPane)
+                                        .addComponent(startButton)
 
                                //
         ).addContainerGap(174, Short.MAX_VALUE)));
@@ -100,9 +131,11 @@ public class Main extends JFrame {
                                 .addGap(18, 18, 18)
                                 //.addComponent(importAnswerB)
                                 .addGap(18 ,18 ,18)
-                                .addComponent(jButton2)
+                                .addComponent(importUserButton)
                                 .addGap(54, 54, 54)
-                                .addComponent(jButton3)
+                                .addComponent(scrollPane)
+                                .addGap(54, 54, 54)
+                                .addComponent(startButton)
                                 .addContainerGap(123, Short.MAX_VALUE))
         );
 
@@ -113,27 +146,32 @@ public class Main extends JFrame {
 
         validateParam();
 
-        startDo();
+        if(!CollectionUtils.isEmpty(userList)){
+            for(User user : userList){
+                new APIController(user.getUsername() , user.getPassword());
+            }
+        }
     }
 
     private void validateParam() throws IOException {
-        if(APIController.userList == null || APIController.userList.size() ==0 ){
+        if(userList == null || userList.size() ==0 ){
             JOptionPane.showOptionDialog( Main.this , "学生账户为空列表 ， 请导入"  , "通知" , OK_CANCEL_OPTION , QUESTION_MESSAGE , null , null , null);
             return;
         }
     }
 
-    private void startDo() {
-        for(ImportUser user : APIController.userList){
-            new APIController(user);
-        }
+
+    public void setDesktopIfWindows(JFileChooser chooser){
+        chooser.setCurrentDirectory(new File(System.getenv("HOME") + "/Desktop"));
+        chooser.setDragEnabled(true);
     }
 
     private void jButton2ActionPerformed(ActionEvent evt) throws IOException {
         JFileChooser jFileChooser = new JFileChooser();
+        setDesktopIfWindows(jFileChooser);
         jFileChooser.showOpenDialog(this);
         if(jFileChooser.getSelectedFile() != null){
-            APIController.userList = UserImportUtil.getImportUserList(jFileChooser.getSelectedFile().getAbsolutePath());
+           this.userList = UserImportUtil.getImportUserList(jFileChooser.getSelectedFile().getAbsolutePath());
         }
     }
     /**
@@ -171,10 +209,6 @@ public class Main extends JFrame {
         });
     }
 
-    // Variables declaration - do not modify
-    private JButton jButton2;
-    private JButton jButton3;
 
-    // End of variables declaration
 }
 

@@ -2,23 +2,30 @@ package com.fsy.task;
 
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
-import com.fsy.task.domain.ImportUser;
+import com.alibaba.fastjson.TypeReference;
+import com.fsy.task.config.WebHeader;
+import com.fsy.task.domain.User;
 import com.fsy.task.domain.QuestionOption;
-import com.fsy.task.domain.enums.AnswerOption;
-import com.fsy.task.dto.ResultDTO.*;
-import com.fsy.task.selenium.SeleniumUtil;
-import com.fsy.task.util.HttpClientUtil;
+import com.fsy.task.dto.*;
 import com.fsy.task.util.MD5Util;
-import lombok.extern.log4j.Log4j;
-import org.apache.http.Header;
 import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.HttpResponse;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.CookieStore;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.BasicCookieStore;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.message.BasicHeader;
+import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.util.EntityUtils;
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
 import org.htmlparser.Node;
 import org.htmlparser.NodeFilter;
 import org.htmlparser.Parser;
@@ -27,136 +34,528 @@ import org.htmlparser.tags.BulletList;
 import org.htmlparser.tags.LinkTag;
 import org.htmlparser.util.NodeList;
 import org.htmlparser.util.ParserException;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class APIController {
-    private HashMap<String, String> cookieMap = new HashMap<String, String>();
+//    private HashMap<String, String> cookieMap = new HashMap<String, String>();
 
-    private static SeleniumUtil seleniumUtil = new SeleniumUtil();
+//    private static SeleniumUtil seleniumUtil = new SeleniumUtil();
 
-    public static List<ImportUser> userList ;
+//    public static List<User> userList ;
 
     private List<Plan> plans = new ArrayList<Plan>();
 
     // key planId value List<ExerciseDTO>
-    private HashMap<String ,List<ExerciseDTO>> planExerciseMap = new HashMap<String, List<ExerciseDTO>>();
+//    @Deprecated
+//    private HashMap<String ,List<ExerciseDTO>> planExerciseMap = new HashMap<String, List<ExerciseDTO>>();
 
 
-    private String lUserId;
+//    private String lUserId;
 
-    private String nickName;
+//    private String nickName;
 
-    private String schoolToken ;
+//    private String schoolToken ;
 
     private String username;
 
     private String password;
 
-    private String schoolId;
+//    private String schoolId;
 
-    private String loginDomain ;
+//    @Deprecated
+//    private String loginDomain ;
 
-    public APIController(ImportUser user){
-        //this.lUserId = user.getUserId();
-        this.username = user.getUsername();
+    private List<ExamDto> exams;
 
-        this.password = user.getPassword();
+    //版本二 修改cookie管理方式 由httpclient的核心cookieStore来维护
+    private CookieStore cookieStore = new BasicCookieStore();
 
-        ImportUser wholeUser = seleniumUtil.getUserInfo(user.getUsername() , user.getPassword());
+    private HttpClient client = HttpClients.custom().setDefaultCookieStore(cookieStore).build();
 
-        this.nickName = wholeUser.getNickName();
+    private String baseUrl = "http://sdnu.wnssedu.com";
 
-        this.password = wholeUser.getPassword();
+    private CDO cdo;
 
-        this.schoolToken = wholeUser.getSchoolToken();
+    public APIController(String username , String password){
+        this.username = username;
 
-        //this.schoolId = user.getSchoolId();
+        this.password = password;
 
-        this.loginDomain = wholeUser.getLoginDomain();
+        String loginXml =  login();
 
-        appendSession2CookieMap();
+        cdo = parseLoginXml(loginXml);
 
-        appendSchoolToken2CookieMap();
+        //二次授权 获取schoolToken token
+        String resp = secondAuth();
 
-        //准备看视频
-        preWatch();
+        System.out.println( "应该返回 callback({res:1}) ， 二次登录授权 ,实际  " + resp);
 
-        //准备做职业测评
+        String teachPlanJson = getTeachPlansJson();
+        this.plans = parseTeachPlanJson(teachPlanJson);
+
+        //做课程
+        doPlanV2();
+
+        //看测评
+        doTestV2();
+
+        String examListJson = getExamListJson();
+
+        ExamListDto examListDto = JSONObject.parseObject(examListJson , ExamListDto.class);
+
+        //nStart 2是已结束 1是进行中
+        exams = examListDto.getResponse().getCdosUserExaminList()
+                .stream().filter((ExamDto examDto)->{return "1".equals(examDto.getNStart());}).collect(Collectors.toList());
+
+        return;
+    }
+
+    private String getExamListJson() {
+        String url = baseUrl + "/student/rest/v1/study/getExaminList";
+
+        HttpPost post = new HttpPost(url);
+
+        post.addHeader(new BasicHeader(WebHeader.Refer_Key , "http://sdnu.wnssedu.com/student/prese/studycenter.htm"));
+        post.addHeader(new BasicHeader(WebHeader.USERAGENT_KEY , WebHeader.USERAGENT_VALUE));
+        post.addHeader(new BasicHeader(WebHeader.CONTENTTYPE_KEY , WebHeader.CONTENTTYPE_VALUE));
+
         try {
-            preTest();
-        } catch (ParserException e) {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
             e.printStackTrace();
+        }
+        return null;
+    }
+
+    private List<ExerciseDTO> parseCourseListJson(String planCourseListJson) {
+        List<ExerciseDTO> exercises = new ArrayList<>();
+        if (!StringUtils.isEmpty(planCourseListJson)) {
+            JSONArray courseArray = JSONObject.parseObject(planCourseListJson).getJSONObject("response").getJSONArray("cdoCourseList");
+            if (courseArray != null && courseArray.size() > 0) {
+                for (int index = 0; index < courseArray.size(); index++) {
+                    JSONObject courseJson = courseArray.getJSONObject(index);
+                    ExerciseDTO exercise = courseJson.toJavaObject(ExerciseDTO.class);
+                    exercises.add(exercise);
+                }
+            }
+        }
+        return exercises;
+    }
+
+//    private void doPlan() {
+//        if (CollectionUtils.isEmpty(plans)) {
+//            String blankStyle = "      ";
+//            for (Plan plan : plans) {
+//                if (plan.getStrState().equals("进行中")) {
+//                    System.out.println(blankStyle + plan.getStrPlanName());
+//                    //http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList  lPlanId=2400000001
+//                    setPlanExerciseMap(plan.getLPlanId());
+//                    long startTimeMills = 0l;
+//                    List<ExerciseDTO> exerciseDTOS = this.planExerciseMap.get(plan.getLPlanId());
+//
+//                    //TODO JDK 8
+//                    if (exerciseDTOS != null && exerciseDTOS.size() > 0) {
+//                        startTimeMills = System.currentTimeMillis();
+//                        for (ExerciseDTO exerciseDTO : exerciseDTOS) {
+//                            String strName = exerciseDTO.getStrName();
+//                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+//                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
+//                                for (SectionDTO sectionDTO : cdoSectionList) {
+//                                    if (sectionDTO.getNViewTimeLength() != sectionDTO.getNTimeLength()) {
+//                                        //进行中的任务 自动看视频
+//                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+//                                        for (int count = 0; count < needCount; count++) {
+//                                            this.watchVideo(sectionDTO.getLCoursewareId());
+//                                            System.out.print(".");
+//                                            //解决看视频太慢的问题
+//                                            //        Thread.sleep(30000);
+//                                            //支持秒刷的业务逻辑
+//                                        }
+//                                    }
+//                                    else {
+//                                        System.out.println(blankStyle + blankStyle + blankStyle + " " + sectionDTO.getStrName() + "已完成 ， 已自动跳过。");
+//                                    }
+//                                }
+//                            }
+//                        }
+//                    }
+//
+//                    //服务器30秒内只允许请求一次看视频接口 , 故在此准备所有的请求视频的session 下一次全部请求
+//                    utilNextRequest30s(startTimeMills);
+//                    //支持秒刷的业务
+//                    List<ExerciseDTO> exerciseDTOS2 = this.planExerciseMap.get(plan.getLPlanId());
+//                    if (exerciseDTOS2 != null && exerciseDTOS2.size() > 0) {
+//                        for (ExerciseDTO exerciseDTO : exerciseDTOS2) {
+//                            String strName = exerciseDTO.getStrName();
+//                            System.out.println(blankStyle + blankStyle + " " + strName);
+//                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+//                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
+//                                for (SectionDTO sectionDTO : cdoSectionList) {
+//                                    int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+//                                    if(needCount <=0){
+//                                        System.out.println(sectionDTO.getStrName() +" 已完成 ， 跳过。。");
+//                                        continue;
+//                                    }
+//                                    String courseId = sectionDTO.getLCoursewareId();
+//                                    for (int count = 0; count < needCount; count++) {
+//                                        //看视频接口
+//                                        doWatch(courseId);
+//                                        System.out.print(".");
+//                                    }
+//                                    System.out.println(blankStyle + blankStyle + blankStyle + sectionDTO.getStrName());
+//
+//                                }
+//                            }
+//                        }
+//
+//                    }
+//                }else {
+//                    System.out.println("看视频 " + plan.getStrPlanName() + " 已完成 ，自动跳过。");
+//                }
+//            }
+//        }
+//    }
+
+    private void doPlanV2() {
+        if (!CollectionUtils.isEmpty(plans)) {
+            String blankStyle = "      ";
+            for (Plan plan : plans) {
+                if (plan.getStrState().equals("进行中")) {
+                    System.out.println(blankStyle + plan.getStrPlanName());
+                    //http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList  lPlanId=2400000001
+                    String planCourseListJson = getPlanCourseListJson(plan.getLPlanId());
+                    List<ExerciseDTO> exerciseDTOS = parseCourseListJson(planCourseListJson);
+                    long startTimeMills = 0l;
+
+                    //TODO JDK 8
+                    if (!CollectionUtils.isEmpty(exerciseDTOS)) {
+                        startTimeMills = System.currentTimeMillis();
+                        for (ExerciseDTO exerciseDTO : exerciseDTOS) {
+                            String strName = exerciseDTO.getStrName();
+                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+                            if (!CollectionUtils.isEmpty(cdoSectionList)) {
+                                for (SectionDTO sectionDTO : cdoSectionList) {
+                                    if (sectionDTO.getNViewTimeLength() != sectionDTO.getNTimeLength()) {
+                                        //进行中的任务 自动看视频
+                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+                                        for (int count = 0; count < needCount; count++) {
+                                            watchVideoBefore(sectionDTO.getLCoursewareId());
+                                            System.out.print(".");
+                                            //解决看视频太慢的问题
+                                            //        Thread.sleep(30000);
+                                            //支持秒刷的业务逻辑
+                                        }
+                                    }
+                                    else {
+                                        System.out.println(blankStyle + blankStyle + blankStyle + " " + sectionDTO.getStrName() + "已完成 ， 已自动跳过。");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    //服务器30秒内只允许请求一次看视频接口 , 故在此准备所有的请求视频的session 下一次全部请求
+                    utilNextRequest30s(startTimeMills);
+                    //支持秒刷的业务
+                    List<ExerciseDTO> exerciseDTOS2 = exerciseDTOS;
+                    if (exerciseDTOS2 != null && exerciseDTOS2.size() > 0) {
+                        for (ExerciseDTO exerciseDTO : exerciseDTOS2) {
+                            String strName = exerciseDTO.getStrName();
+                            System.out.println(blankStyle + blankStyle + " " + strName);
+                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
+                                for (SectionDTO sectionDTO : cdoSectionList) {
+                                    int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+                                    if(needCount <=0){
+                                        System.out.println(sectionDTO.getStrName() +" 已完成 ， 跳过。。");
+                                        continue;
+                                    }
+                                    String courseId = sectionDTO.getLCoursewareId();
+                                    for (int count = 0; count < needCount; count++) {
+                                        //看视频接口
+                                        String watchResp = doWatchV2(courseId);
+                                        System.out.println(watchResp);
+                                        System.out.print(".");
+                                    }
+                                    System.out.println(blankStyle + blankStyle + blankStyle + sectionDTO.getStrName());
+
+                                }
+                            }
+                        }
+
+                    }
+                }else {
+                    System.out.println("看视频 " + plan.getStrPlanName() + " 已完成 ，自动跳过。");
+                }
+            }
         }
     }
 
-    private void appendSchoolToken2CookieMap() {
-
-        cookieMap.put(CookieConstant.SCHOOL_TOKEN , this.schoolToken);
+    private List<Plan> parseTeachPlanJson(String teachPlanJson) {
+        JSONObject jsonObject = JSONObject.parseObject(teachPlanJson);
+        JSONArray cdosPlanList = jsonObject.getJSONObject("response").getJSONArray("cdosPlanList");
+        List<Plan> plans = new ArrayList<Plan>();
+        if(cdosPlanList != null && cdosPlanList.size() >0){
+            for(int index = 0 ; index< cdosPlanList.size() ; index++ ){
+                JSONObject planJson = cdosPlanList.getJSONObject(index);
+                Plan plan = planJson.toJavaObject(Plan.class);
+                plans.add(plan);
+            }
+        }
+        return plans;
     }
 
-    private void preTest() throws ParserException {
-        //获取测评主页面
-        String resp = getTestMainPage();
+    private String secondAuth() {
+        //jsonpCallback=callback
+        //_=1541580117494
+        String secondAuthUrl = cdo.getArrLoginUrl()+"jsonpCallback=callback&_="+System.currentTimeMillis();
 
-        //setUserId
-        setUserId(resp);
+        HttpGet get = new HttpGet(secondAuthUrl);
 
+        get.addHeader(new BasicHeader(WebHeader.USERAGENT_KEY, WebHeader.USERAGENT_VALUE));
+        get.addHeader(new BasicHeader(WebHeader.Refer_Key , "http://sdnu.wnssedu.com/modal/…Mo.htm?aTargetURL=%2Findex.htm"));
 
-        //setSchoolId
-        setSchoolId(resp);
+        try {
+            HttpResponse httpResponse = client.execute(get);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
 
-        Parser parser = Parser.createParser(resp, Charset.defaultCharset().toString());
-        //缓冲层 parser解析一次之后，再次解析为空
-        NodeList cacheNodeList = parser.parse(new NodeFilter() {
-            public boolean accept(Node node) {
-                return true;
-            }
-        });
-        //startevaluation.htm
-        NodeFilter testFilter = new NodeFilter() {
-            public boolean accept(Node node) {
-                if (node instanceof LinkTag
-                        && ((LinkTag) node).getAttribute("href") != null
-                        && ((LinkTag) node).getAttribute("href").contains("startevaluation.htm")
-                 )
+    }
+
+    private CDO parseLoginXml(String cdoXmlStr) {
+        try {
+            Document doc = DocumentHelper.parseText(cdoXmlStr);
+            Element root = doc.getRootElement();
+            String nCode = ((Element)root.selectSingleNode("//NF[@N='nCode']")).attribute("V").getValue();
+            String strText = ((Element)root.selectSingleNode("//STRF[@N='strText']")).attribute("V").getValue();
+            String strInfo = ((Element)root.selectSingleNode("//STRF[@N='strInfo']")).attribute("V").getValue();
+            String lId = ((Element)root.selectSingleNode("//LF[@N='lId']")).attribute("V").getValue();
+            String strLoginId = ((Element)root.selectSingleNode("//STRF[@N='strLoginId']")).attribute("V").getValue();
+            String strHash = ((Element)root.selectSingleNode("//STRF[@N='strHash']")).attribute("V").getValue();
+            String strName = ((Element)root.selectSingleNode("//STRF[@N='strName']")).attribute("V").getValue();
+            String strNickName = ((Element)root.selectSingleNode("//STRF[@N='strNickName']")).attribute("V").getValue();
+            String nVerifyStage = ((Element)root.selectSingleNode("//BYF[@N='nVerifyStage']")).attribute("V").getValue();
+            String dtLastLoginTime = ((Element)root.selectSingleNode("//DTF[@N='dtLastLoginTime']")).attribute("V").getValue();
+            String strHeadURL = ((Element)root.selectSingleNode("//STRF[@N='strHeadURL']")).attribute("V").getValue();
+            String bLocked = ((Element)root.selectSingleNode("//BF[@N='bLocked']")).attribute("V").getValue();
+            String bIsRegUser = ((Element)root.selectSingleNode("//BF[@N='bIsRegUser']")).attribute("V").getValue();
+            String strEmail = ((Element)root.selectSingleNode("//STRF[@N='strEmail']")).attribute("V").getValue();
+            String lSchoolId = ((Element)root.selectSingleNode("//LF[@N='lSchoolId']")).attribute("V").getValue();
+            String nRecordCount = ((Element)root.selectSingleNode("//NF[@N='nRecordCount']")).attribute("V").getValue();
+            String arrLoginUrl = ((Element)root.selectSingleNode("//STR")).getText();
+            String nType = ((Element)root.selectSingleNode("//NF[@N='nType']")).attribute("V").getValue();
+
+            CDO cdo  = CDO.builder()
+                    .nCode(nCode)
+                    .strText(strText)
+                    .strInfo(strInfo)
+                    .lId(lId)
+                    .strLoginId(strLoginId)
+                    .strHash(strHash)
+                    .strName(strName)
+                    .strNickName(strNickName)
+                    .nVerifyStage(nVerifyStage)
+                    .dtLastLoginTime(dtLastLoginTime)
+                    .strHeadURL(strHeadURL)
+                    .bLocked(bLocked)
+                    .bIsRegUser(bIsRegUser)
+                    .strEmail(strEmail)
+                    .lSchoolId(lSchoolId)
+                    .nRecordCount(nRecordCount)
+                    .arrLoginUrl(arrLoginUrl)
+                    .nType(nType)
+                    .build();
+            return cdo;
+        } catch (DocumentException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private String login() {
+        String loginUrl = baseUrl + "/modal/handleTrans.cdo?strServiceName=UserService&strTransName=SSOLogin";
+        HttpPost post = new HttpPost(loginUrl);
+
+        post.addHeader(new BasicHeader(WebHeader.CONTENTTYPE_KEY,WebHeader.CONTENTTYPE_VALUE));
+
+        List<NameValuePair> nvps = new ArrayList<NameValuePair>();
+        nvps.add(new BasicNameValuePair("$$CDORequest$$" , buildLoginParam(this.username , this.password)));
+
+        post.setEntity(new UrlEncodedFormEntity(nvps , Charset.defaultCharset()));
+
+        try {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public APIController(User user){
+
+//        this.username = user.getUsername();
+//
+//        this.password = user.getPassword();
+//
+//        User wholeUser = seleniumUtil.getUserInfo(user.getUsername() , user.getPassword());
+//
+//        this.nickName = wholeUser.getNickName();
+//
+//        this.password = wholeUser.getPassword();
+//
+//        this.schoolToken = wholeUser.getSchoolToken();
+//
+//        //this.schoolId = user.getSchoolId();
+//
+//        this.loginDomain = wholeUser.getLoginDomain();
+//
+////        appendSession2CookieMap();
+//        login();
+
+//        appendSchoolToken2CookieMap();
+
+        //准备看视频
+//        preWatch();
+//
+//        //准备做职业测评
+//        doTest();
+    }
+
+//    private void appendSchoolToken2CookieMap() {
+//
+//        cookieMap.put(CookieConstant.SCHOOL_TOKEN , this.schoolToken);
+//    }
+
+//    private void doTest() {
+//        try{
+//        //获取测评主页面
+//        String resp = getTestMainPage();
+//
+//        //setUserId
+////        setUserId(resp);
+////
+////        //setSchoolId
+////        setSchoolId(resp);
+//
+//        Parser parser = Parser.createParser(resp, Charset.defaultCharset().toString());
+//        //缓冲层 parser解析一次之后，再次解析为空
+//        NodeList cacheNodeList = parser.parse(new NodeFilter() {
+//            public boolean accept(Node node) {
+//                return true;
+//            }
+//        });
+//        //startevaluation.htm
+//        NodeFilter testFilter = new NodeFilter() {
+//            public boolean accept(Node node) {
+//                if (node instanceof LinkTag
+//                        && ((LinkTag) node).getAttribute("href") != null
+//                        && ((LinkTag) node).getAttribute("href").contains("startevaluation.htm")
+//                 )
+//                    return true;
+//                else return false;
+//            }
+//        };
+//        NodeList thatMatch = cacheNodeList.extractAllNodesThatMatch(testFilter);
+//        if(thatMatch != null && thatMatch.size()>0) {
+//            for (int matchIndex = 0; matchIndex < thatMatch.size(); matchIndex++) {
+//                Node[] linkNode = thatMatch.toNodeArray();
+//                if (linkNode[matchIndex] instanceof LinkTag) {
+//                    LinkTag linkTags = (LinkTag) linkNode[matchIndex];
+//                    //测评ID startevaluation.htm?id=25
+//                    String testId = linkTags.getAttribute("href");
+//                    String testIdPage = doTestId(testId);
+//                    List<QuestionOption> questionIds = getQuestionIds( testIdPage);
+//                    //String questionOptionCount = questionIds.remove(questionIds.size() -1 );
+//                    publishTestEvent(schoolId, lUserId, this.nickName, testId, questionIds);
+//                    System.out.println(this.nickName + "  测评" + testId + " 通过");
+//                }
+//            }
+//        }}catch (Exception e){
+//            e.printStackTrace();
+//        }
+//        return;
+//    }
+
+    private void doTestV2() {
+        try{
+            //获取测评主页面
+            String resp = getTestMainPage();
+
+            //setUserId
+//            setUserId(resp);
+
+            //setSchoolId
+//            setSchoolId(resp);
+
+            Parser parser = Parser.createParser(resp, Charset.defaultCharset().toString());
+            //缓冲层 parser解析一次之后，再次解析为空
+            NodeList cacheNodeList = parser.parse(new NodeFilter() {
+                public boolean accept(Node node) {
                     return true;
-                else return false;
-            }
-        };
-        NodeList thatMatch = cacheNodeList.extractAllNodesThatMatch(testFilter);
-        if(thatMatch != null && thatMatch.size()>0) {
-            for (int matchIndex = 0; matchIndex < thatMatch.size(); matchIndex++) {
-                Node[] linkNode = thatMatch.toNodeArray();
-                if (linkNode[matchIndex] instanceof LinkTag) {
-                    LinkTag linkTags = (LinkTag) linkNode[matchIndex];
-                    //测评ID startevaluation.htm?id=25
-                    String testId = linkTags.getAttribute("href");
-                    String testIdPage = doTestId(testId);
-                    List<QuestionOption> questionIds = getQuestionIds( testIdPage);
-                    //String questionOptionCount = questionIds.remove(questionIds.size() -1 );
-                    publishTestEvent(schoolId, lUserId, this.nickName, testId, questionIds);
-                    System.out.println(this.nickName + "  测评" + testId + " 通过");
                 }
-            }
+            });
+            //startevaluation.htm
+            NodeFilter testFilter = new NodeFilter() {
+                public boolean accept(Node node) {
+                    if (node instanceof LinkTag
+                            && ((LinkTag) node).getAttribute("href") != null
+                            && ((LinkTag) node).getAttribute("href").contains("startevaluation.htm")
+                            )
+                        return true;
+                    else return false;
+                }
+            };
+            NodeList thatMatch = cacheNodeList.extractAllNodesThatMatch(testFilter);
+            if(thatMatch != null && thatMatch.size()>0) {
+                for (int matchIndex = 0; matchIndex < thatMatch.size(); matchIndex++) {
+                    Node[] linkNode = thatMatch.toNodeArray();
+                    if (linkNode[matchIndex] instanceof LinkTag) {
+                        LinkTag linkTags = (LinkTag) linkNode[matchIndex];
+                        //测评ID startevaluation.htm?id=25
+                        String testId = linkTags.getAttribute("href");
+                        String testIdPage = doTestIdV2(testId);
+                        List<QuestionOption> questionIds = getQuestionIds( testIdPage);
+                        //String questionOptionCount = questionIds.remove(questionIds.size() -1 );
+                        publishTestEvent(cdo.getLSchoolId(), cdo.getLId(), cdo.getStrName(), testId, questionIds);
+                        System.out.println(cdo.getStrName() + "  测评" + testId + " 通过");
+                    }
+                }
+            }}catch (Exception e){
+            e.printStackTrace();
         }
         return;
     }
 
-    private void setUserId(String resp) {
-        String userIdPattern = "arr[\"lUserId\"]=";
-        int userIndexStart = resp.indexOf(userIdPattern);
-        int userIndexEnd = resp.indexOf(";"  , userIndexStart);
-        this.lUserId = resp.substring(userIndexStart +userIdPattern.length()  , userIndexEnd  ) ;
-    }
-
-    private void setSchoolId(String resp) {
-        String userIdPattern = "arr[\"lSchoolId\"]=";
-        int schoolIndexStart = resp.indexOf(userIdPattern);
-        int schoolIndexEnd = resp.indexOf(";"  , schoolIndexStart);
-        this.schoolId = resp.substring(schoolIndexStart  +userIdPattern.length()  , schoolIndexEnd  ) ;
-    }
+//    private void setUserId(String resp) {
+//        String userIdPattern = "arr[\"lUserId\"]=";
+//        int userIndexStart = resp.indexOf(userIdPattern);
+//        int userIndexEnd = resp.indexOf(";"  , userIndexStart);
+//        this.lUserId = resp.substring(userIndexStart +userIdPattern.length()  , userIndexEnd  ) ;
+//    }
+//
+//    private void setSchoolId(String resp) {
+//        String userIdPattern = "arr[\"lSchoolId\"]=";
+//        int schoolIndexStart = resp.indexOf(userIdPattern);
+//        int schoolIndexEnd = resp.indexOf(";"  , schoolIndexStart);
+//        this.schoolId = resp.substring(schoolIndexStart  +userIdPattern.length()  , schoolIndexEnd  ) ;
+//    }
 
     private List<QuestionOption> getQuestionIds( String testIdPage) {
 
@@ -180,7 +579,7 @@ public class APIController {
             public boolean accept(Node node) {
                 if (node instanceof BulletList
                         && ((BulletList) node).getAttribute("class") != null
-                        && ((BulletList) node).getAttribute("class").equals("nswer")
+                        && ((BulletList) node).getAttribute("class").contains("nswer")
                         && ((BulletList) node).getAttribute("questionId") != null
                         )
                     return true;
@@ -222,16 +621,13 @@ public class APIController {
      * @param testId
      * @param options 选项的个数 影响答题 该题目的id
      */
-    private void publishTestEvent(String schoolId , String userId , String nickName , String testId ,List<QuestionOption> options){
+    private String publishTestEvent(String schoolId , String userId , String nickName , String testId ,List<QuestionOption> options){
         if(options == null || options.size()==0){
             System.out.println("获取该测评id选项失败:"+ testId  + "\n请联系管理员排除bug");
             throw new IllegalArgumentException("获取该测评id选项失败:"+ testId );
         }
 
         String url = "http://sdnu.wnssedu.com/student/tc/careerPlaning/handleTrans.cdo?strServiceName=EvalutionService&strTransName=addEvaluationResult";
-        String cookie = getCookie();
-
-        HashMap postParam = new HashMap();
         StringBuffer postValue = new StringBuffer();
         String originalId = testId.split("=")[1];
         postValue.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
@@ -244,11 +640,6 @@ public class APIController {
                 "  <STRF N=\"strUserName\" V=\""+nickName+"\"/>\n" +
                 "  <LF N=\"lEvaluationId\" V=\""+originalId+"\"/>\n" +
                 "  <STRF N=\"strAnswer\" V=\"{answers:[\n");
-
-
-
-
-
         StringBuffer wrapValue = new StringBuffer();
         for(int i = 0 ; i <options.size() ; i++)
         {
@@ -286,148 +677,203 @@ public class APIController {
         postValue.append("]}\"/>\n" +
                 "  <STRF N=\"strToken\" V=\"\"/>\n" +
                 "</CDO>\n");
+        HttpPost post = new HttpPost(url);
+        post.addHeader(new BasicHeader("Content-Type","application/x-www-form-urlencoded;charset=UTF-8"));
+        post.addHeader(new BasicHeader("Referer","http://sdnu.wnssedu.com"));
 
-        postParam.put("$$CDORequest$$" , postValue );
-        HttpClientUtil.postResByUrlAndCookie(url , cookie , postParam , false  );
+        List<NameValuePair> nvps = new ArrayList<>();
+        nvps.add(new BasicNameValuePair("$$CDORequest$$" , postValue.toString()));
+        post.setEntity(new UrlEncodedFormEntity(nvps ,Charset.forName("UTF-8")));
+        try {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity tempEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(tempEntity, Charset.defaultCharset());
+
+            return respStr;
+
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
 
     }
 
-    private String doTestId(String testId) {
-        String url = "http://sdnu.wnssedu.com/student/tc/careerPlaning/"+testId;
-        String cookie = getCookie();
-        HashMap<String,String> headerParam = new HashMap<String, String>();
-        headerParam.put("Referer", "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm");
-        String respStr = HttpClientUtil.getResByUrlAndCookie(url , headerParam , cookie  , false);
-        return respStr;
+    private String doTestIdV2(String testId) {
+        String url = baseUrl + "/student/tc/careerPlaning/"+testId;
+        HttpGet get = new HttpGet(url);
+        get.addHeader(new BasicHeader("Referer", "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm"));
+        try {
+            HttpResponse httpResponse = client.execute(get);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
     }
+//    private String doTestId(String testId) {
+//        String url = "http://sdnu.wnssedu.com/student/tc/careerPlaning/"+testId;
+//        String cookie = getCookie();
+//        HashMap<String,String> headerParam = new HashMap<String, String>();
+//        headerParam.put("Referer", "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm");
+//        String respStr = HttpClientUtil.getResByUrlAndCookie(url , headerParam , cookie  , false);
+//        return respStr;
+//    }
 
     private String getTestMainPage(){
+        String url = baseUrl + "/student/tc/careerPlaning/evaluationlist.htm";
 
-        String url = "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm";
-        String cookie = getCookie();
-        HashMap<String,String> headerParam = new HashMap<String, String>();
-        headerParam.put("Referer", "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm");
-        String respStr = HttpClientUtil.getResByUrlAndCookie(url , headerParam , cookie  , false);
-        return respStr;
-    }
-
-
-    private void preWatch()  {
-        //需要登录
-        System.out.println(username + "  开始看视频：");
-        getTeachPlans(getCookie());
-        String blankStyle = "      ";
-        if (plans != null && plans.size() > 0) {
-            for (Plan plan : plans) {
-                System.out.println(blankStyle + plan.getStrPlanName());
-                if (plan.getStrState().equals("进行中")) {
-                    //http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList  lPlanId=2400000001
-
-                    List<ExerciseDTO> exercises = getExerciseList(plan.getLPlanId());
-
-                    long startTimeMills = 0l;
-                    float hasCompleteExercise = 0.0f;
-                    List<ExerciseDTO> exerciseDTOS = this.planExerciseMap.get(plan.getLPlanId());
-
-                    //TODO JDK 8
-                    if (exerciseDTOS != null && exerciseDTOS.size() > 0) {
-                        startTimeMills = System.currentTimeMillis();
-                        for (ExerciseDTO exerciseDTO : exerciseDTOS) {
-                            String strName = exerciseDTO.getStrName();
-                            System.out.println(blankStyle + blankStyle + " " + strName);
-                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
-                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
-                                for (SectionDTO sectionDTO : cdoSectionList) {
-                                    hasCompleteExercise++;
-                                    if (sectionDTO.getNViewTimeLength() != sectionDTO.getNTimeLength()) {
-                                        //进行中的任务 自动看视频
-                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
-                                        for (int count = 0; count < needCount; count++) {
-                                            this.watchVideo(sectionDTO.getLCoursewareId());
-                                            System.out.print(".");
-                                            //解决看视频太慢的问题
-                                            //        Thread.sleep(30000);
-                                            //支持秒刷的业务逻辑
-                                        }
-                                    }
-                                    else {
-                                        System.out.println(blankStyle + blankStyle + blankStyle + " " + sectionDTO.getStrName() + "已完成 ， 已自动跳过。");
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    //服务器30秒内只允许请求一次看视频接口 , 故在此准备所有的请求视频的session 下一次全部请求
-                    utilNextRequest30s(startTimeMills);
-                    //支持秒刷的业务
-                    List<ExerciseDTO> exerciseDTOS2 = this.planExerciseMap.get(plan.getLPlanId());
-                    if (exerciseDTOS2 != null && exerciseDTOS2.size() > 0) {
-                        for (ExerciseDTO exerciseDTO : exerciseDTOS2) {
-                            String strName = exerciseDTO.getStrName();
-                            System.out.println(blankStyle + blankStyle + " " + strName);
-                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
-                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
-                                for (SectionDTO sectionDTO : cdoSectionList) {
-                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
-                                        if(needCount <=0){
-                                            System.out.println(sectionDTO.getStrName() +" 已完成 ， 跳过。。");
-                                            continue;
-                                        }
-                                        String courseId = sectionDTO.getLCoursewareId();
-                                        for (int count = 0; count < needCount; count++) {
-                                            //看视频接口
-                                            doWatch(courseId);
-                                            System.out.print(".");
-                                        }
-                                        hasCompleteExercise++;
-                                        System.out.println(blankStyle + blankStyle + blankStyle + sectionDTO.getStrName() + hasCompleteExercise / cdoSectionList.size() * 100 + "%");
-
-                                }
-                            }
-                        }
-
-                    } else {
-                        System.out.println("看视频 " + plan.getStrPlanName() + " 已完成 ，自动跳过。");
-                    }
-                }
-            }
+        HttpGet get = new HttpGet(url);
+        get.addHeader(new BasicHeader( "Referer" , "http://sdnu.wnssedu.com/student/tc/careerPlaning/evaluationlist.htm" ));
+        try {
+            HttpResponse httpResponse = client.execute(get);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
         }
+        return null;
     }
 
-    private void doWatch(String courseId) {
 
-        String tempUrl = "http://course.wnssedu.com/Servlet/recordStudy.svl?lCoursewareId=" + courseId + "&strStartTime=0";
-        CloseableHttpClient httpclient = HttpClients.createDefault();
-        HttpPost httPost3 = new HttpPost(tempUrl);
+//    private void preWatch()  {
+//        System.out.println(username + "  开始看视频：");
+////        setTeachPlans(getCookie());
+//        String blankStyle = "      ";
+//        if (plans != null && plans.size() > 0) {
+//            for (Plan plan : plans) {
+//                if (plan.getStrState().equals("进行中")) {
+//                    System.out.println(blankStyle + plan.getStrPlanName());
+//                    //http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList  lPlanId=2400000001
+//                    setPlanExerciseMap(plan.getLPlanId());
+//                    long startTimeMills = 0l;
+//                    List<ExerciseDTO> exerciseDTOS = this.planExerciseMap.get(plan.getLPlanId());
+//
+//                    //TODO JDK 8
+//                    if (exerciseDTOS != null && exerciseDTOS.size() > 0) {
+//                        startTimeMills = System.currentTimeMillis();
+//                        for (ExerciseDTO exerciseDTO : exerciseDTOS) {
+//                            String strName = exerciseDTO.getStrName();
+//                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+//                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
+//                                for (SectionDTO sectionDTO : cdoSectionList) {
+//                                    if (sectionDTO.getNViewTimeLength() != sectionDTO.getNTimeLength()) {
+//                                        //进行中的任务 自动看视频
+//                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+//                                        for (int count = 0; count < needCount; count++) {
+//                                            this.watchVideo(sectionDTO.getLCoursewareId());
+//                                            System.out.print(".");
+//                                            //解决看视频太慢的问题
+//                                            //        Thread.sleep(30000);
+//                                            //支持秒刷的业务逻辑
+//                                        }
+//                                    }
+//                                    else {
+//                                        System.out.println(blankStyle + blankStyle + blankStyle + " " + sectionDTO.getStrName() + "已完成 ， 已自动跳过。");
+//                                    }
+//                                }
+//                            }
+//                        }
+//                    }
+//
+//                    //服务器30秒内只允许请求一次看视频接口 , 故在此准备所有的请求视频的session 下一次全部请求
+//                    utilNextRequest30s(startTimeMills);
+//                    //支持秒刷的业务
+//                    List<ExerciseDTO> exerciseDTOS2 = this.planExerciseMap.get(plan.getLPlanId());
+//                    if (exerciseDTOS2 != null && exerciseDTOS2.size() > 0) {
+//                        for (ExerciseDTO exerciseDTO : exerciseDTOS2) {
+//                            String strName = exerciseDTO.getStrName();
+//                            System.out.println(blankStyle + blankStyle + " " + strName);
+//                            List<SectionDTO> cdoSectionList = exerciseDTO.getCdoSectionList();
+//                            if (cdoSectionList != null && cdoSectionList.size() > 0) {
+//                                for (SectionDTO sectionDTO : cdoSectionList) {
+//                                        int needCount = sectionDTO.getNTimeLength() - sectionDTO.getNViewTimeLength();
+//                                        if(needCount <=0){
+//                                            System.out.println(sectionDTO.getStrName() +" 已完成 ， 跳过。。");
+//                                            continue;
+//                                        }
+//                                        String courseId = sectionDTO.getLCoursewareId();
+//                                        for (int count = 0; count < needCount; count++) {
+//                                            //看视频接口
+//                                            doWatch(courseId);
+//                                            System.out.print(".");
+//                                        }
+//                                        System.out.println(blankStyle + blankStyle + blankStyle + sectionDTO.getStrName());
+//
+//                                }
+//                            }
+//                        }
+//
+//                    }
+//                }else {
+//                    System.out.println("看视频 " + plan.getStrPlanName() + " 已完成 ，自动跳过。");
+//                }
+//            }
+//        }
+//    }
+
+
+    private String doWatchV2(String courseId) {
+
+        String url = "http://course.wnssedu.com/Servlet/recordStudy.svl?lCoursewareId=" + courseId + "&strStartTime=0";
+        HttpPost post = new HttpPost(url);
         //lCoursewareId=227
         //strStartTime=0
-        httPost3.setEntity(new StringEntity("lCoursewareId=" + courseId + "&strStartTime=0", Charset.defaultCharset()));
+        post.setEntity(new StringEntity("lCoursewareId=" + courseId + "&strStartTime=0", Charset.defaultCharset()));
         //过滤出已完成的
-        httPost3.setHeader(new BasicHeader(CookieConstant.COOKIE, getCookie()));
+//        httPost3.setHeader(new BasicHeader(CookieConstant.COOKIE, getCookie()));
 
         try {
-            CloseableHttpResponse response3 = httpclient.execute(httPost3);
-            HttpEntity tempEntity = response3.getEntity();
-            String respStrr = EntityUtils.toString(tempEntity, Charset.defaultCharset());
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity tempEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(tempEntity, Charset.defaultCharset());
 
-            Header[] cookies1 = response3.getHeaders("Set-Cookie");
-            StringBuffer cookieStr3 = new StringBuffer();
-            if (cookies1 != null && cookies1.length != 0) {
-                for (Header cookHeader : cookies1) {
-                    cookieStr3.append(cookHeader.getValue() + ";");
-                }
-            }
-            rebuildCookieMap(cookieStr3.toString());
-            response3.close();
+            return respStr;
 
 
         } catch (IOException e) {
             e.printStackTrace();
         }
 
-
+        return null;
     }
+
+//    private void doWatch(String courseId) {
+//
+//        String tempUrl = "http://course.wnssedu.com/Servlet/recordStudy.svl?lCoursewareId=" + courseId + "&strStartTime=0";
+//        CloseableHttpClient httpclient = HttpClients.createDefault();
+//        HttpPost httPost3 = new HttpPost(tempUrl);
+//        //lCoursewareId=227
+//        //strStartTime=0
+//        httPost3.setEntity(new StringEntity("lCoursewareId=" + courseId + "&strStartTime=0", Charset.defaultCharset()));
+//        //过滤出已完成的
+////        httPost3.setHeader(new BasicHeader(CookieConstant.COOKIE, getCookie()));
+//
+//        try {
+//            CloseableHttpResponse response3 = httpclient.execute(httPost3);
+//            HttpEntity tempEntity = response3.getEntity();
+//            String respStrr = EntityUtils.toString(tempEntity, Charset.defaultCharset());
+//
+//            Header[] cookies1 = response3.getHeaders("Set-Cookie");
+//            StringBuffer cookieStr3 = new StringBuffer();
+//            if (cookies1 != null && cookies1.length != 0) {
+//                for (Header cookHeader : cookies1) {
+//                    cookieStr3.append(cookHeader.getValue() + ";");
+//                }
+//            }
+////            rebuildCookieMap(cookieStr3.toString());
+//            response3.close();
+//
+//
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//        }
+//
+//
+//    }
 
     private void utilNextRequest30s(long startTimeMills) {
 
@@ -443,69 +889,88 @@ public class APIController {
         }
     }
 
-    private List<ExerciseDTO> getExerciseList(String planId) {
-        List<ExerciseDTO> exercises = new ArrayList<ExerciseDTO>();
+    private String getPlanCourseListJson(String planId){
         String url = "http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList";
-        CloseableHttpClient httpclient = HttpClients.createDefault();
         HttpPost httPost = new HttpPost(url);
         httPost.setEntity(new StringEntity("{\n" +
                 "\t\"lPlanId\":\"" +  planId + "\"\n" +
                 "}", Charset.defaultCharset()));
-        //过滤出已完成的
-        httPost.setHeader(new BasicHeader(CookieConstant.COOKIE, getCookie()));
         httPost.addHeader(new BasicHeader("Content-Type", "application/json"));
-        CloseableHttpResponse response2 = null;
+
         try {
-            response2 = httpclient.execute(httPost);
-            Header[] cookies = response2.getHeaders("Set-Cookie");
-            StringBuffer cookieStr = new StringBuffer();
-            if (cookies != null && cookies.length != 0) {
-                for (Header cookHeader : cookies) {
-                    cookieStr.append(cookHeader.getValue() + ";");
-                }
-            }
-            rebuildCookieMap(cookieStr.toString());
-            HttpEntity entity2 = response2.getEntity();
-            String respStr = EntityUtils.toString(entity2, Charset.defaultCharset());
-            if (respStr != null && respStr.length() > 0) {
-                JSONArray courseArray = JSONObject.parseObject(respStr).getJSONObject("response").getJSONArray("cdoCourseList");
-                if (courseArray != null && courseArray.size() > 0) {
-                    for (int index = 0; index < courseArray.size(); index++) {
-                        JSONObject courseJson = courseArray.getJSONObject(index);
-                        ExerciseDTO exercise = courseJson.toJavaObject(ExerciseDTO.class);
-                        exercises.add(exercise);
-                    }
-                }
-            }
+            HttpResponse httpResponse = client.execute(httPost);
+            HttpEntity httpEntity= httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity, Charset.defaultCharset());
+            return respStr;
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return exercises;
+        return null;
 
     }
+//    private void setPlanExerciseMap(String planId) {
+//        List<ExerciseDTO> exercises = new ArrayList<ExerciseDTO>();
+//        String url = "http://sdnu.wnssedu.com/student/rest/v1/study/getPlanCourseList";
+//        CloseableHttpClient httpclient = HttpClients.createDefault();
+//        HttpPost httPost = new HttpPost(url);
+//        httPost.setEntity(new StringEntity("{\n" +
+//                "\t\"lPlanId\":\"" +  planId + "\"\n" +
+//                "}", Charset.defaultCharset()));
+//        //过滤出已完成的
+////        httPost.setHeader(new BasicHeader(CookieConstant.COOKIE, getCookie()));
+//        httPost.addHeader(new BasicHeader("Content-Type", "application/json"));
+//        CloseableHttpResponse response2 = null;
+//        try {
+//            response2 = httpclient.execute(httPost);
+//            Header[] cookies = response2.getHeaders("Set-Cookie");
+//            StringBuffer cookieStr = new StringBuffer();
+//            if (cookies != null && cookies.length != 0) {
+//                for (Header cookHeader : cookies) {
+//                    cookieStr.append(cookHeader.getValue() + ";");
+//                }
+//            }
+////            rebuildCookieMap(cookieStr.toString());
+//            HttpEntity entity2 = response2.getEntity();
+//            String respStr = EntityUtils.toString(entity2, Charset.defaultCharset());
+//            if (respStr != null && respStr.length() > 0) {
+//                JSONArray courseArray = JSONObject.parseObject(respStr).getJSONObject("response").getJSONArray("cdoCourseList");
+//                if (courseArray != null && courseArray.size() > 0) {
+//                    for (int index = 0; index < courseArray.size(); index++) {
+//                        JSONObject courseJson = courseArray.getJSONObject(index);
+//                        ExerciseDTO exercise = courseJson.toJavaObject(ExerciseDTO.class);
+//                        exercises.add(exercise);
+//                    }
+//                }
+//            }
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//        }
+//        this.planExerciseMap.put(planId , exercises);
+//
+//    }
 
-    public void appendSession2CookieMap() {
-        String loginUrl = "http://sdnu.wnssedu.com/modal/handleTrans.cdo?strServiceName=UserService&strTransName=SSOLogin";
-        HashMap<String, String> params = new HashMap<String, String>();
-        params.put("$$CDORequest$$", buildLoginParam(this.username , this.password));
-        String respAndCookie = HttpClientUtil.postResByUrlAndCookie(loginUrl, getCookie(), params, true);
-        try{
-            String cookie = respAndCookie.split("#")[1];
-            rebuildCookieMap(cookie);
-        }catch (IndexOutOfBoundsException e){
-            System.out.println(username +" 密码错误");
-            throw new IllegalArgumentException("");
-        }
-
-    }
+//    public void appendSession2CookieMap() {
+//        String loginUrl = "http://sdnu.wnssedu.com/modal/handleTrans.cdo?strServiceName=UserService&strTransName=SSOLogin";
+//        HashMap<String, String> params = new HashMap<String, String>();
+//        params.put("$$CDORequest$$", buildLoginParam(this.username , this.password));
+//        String respAndCookie = HttpClientUtil.postResByUrlAndCookie(loginUrl, getCookie(), params, true);
+//        try{
+//            String cookie = respAndCookie.split("#")[1];
+//            rebuildCookieMap(cookie);
+//        }catch (IndexOutOfBoundsException e){
+//            System.out.println(username +" 密码错误");
+//            throw new IllegalArgumentException("");
+//        }
+//
+//    }
 
     private String buildLoginParam(String username , String password ) {
-        String schooldId0 = null;
-        if(this.schoolId == null ){
-            schooldId0 = "0";
-        }else{
-            schooldId0 = this.schoolId;
-        }
+        String schooldId0 = "0";
+//        if(this.schoolId == null ){
+//            schooldId0 = "0";
+//        }else{
+//            schooldId0 = this.schoolId;
+//        }
         return "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
                 "\n" +
                 "<CDO>\n" +
@@ -521,20 +986,37 @@ public class APIController {
                 "</CDO>\n";
     }
 
-    public void getTeachPlans(String cookie) {
-        String teachPlanUrl = "http://sdnu.wnssedu.com/student/rest/v1/study/getTeachPlanList";
-        String respStr = HttpClientUtil.getResByUrlAndCookie(teachPlanUrl,  null , cookie, false);
-        JSONObject jsonObject = JSONObject.parseObject(respStr);
-        JSONArray cdosPlanList = jsonObject.getJSONObject("response").getJSONArray("cdosPlanList");
-        List<Plan> plans = new ArrayList<Plan>();
-        if(cdosPlanList != null && cdosPlanList.size() >0){
-            for(int index = 0 ; index< cdosPlanList.size() ; index++ ){
-                JSONObject planJson = cdosPlanList.getJSONObject(index);
-                Plan plan = planJson.toJavaObject(Plan.class);
-                plans.add(plan);
-            }
+//    public void setTeachPlans(String cookie) {
+//        String teachPlanUrl = "http://sdnu.wnssedu.com/student/rest/v1/study/getTeachPlanList";
+//        String respStr = HttpClientUtil.getResByUrlAndCookie(teachPlanUrl,  null , cookie, false);
+//        JSONObject jsonObject = JSONObject.parseObject(respStr);
+//        JSONArray cdosPlanList = jsonObject.getJSONObject("response").getJSONArray("cdosPlanList");
+//        List<Plan> plans = new ArrayList<Plan>();
+//        if(cdosPlanList != null && cdosPlanList.size() >0){
+//            for(int index = 0 ; index< cdosPlanList.size() ; index++ ){
+//                JSONObject planJson = cdosPlanList.getJSONObject(index);
+//                Plan plan = planJson.toJavaObject(Plan.class);
+//                plans.add(plan);
+//            }
+//        }
+//        this.plans = plans;
+//    }
+
+    public String getTeachPlansJson() {
+        String teachPlanUrl = baseUrl + "/student/rest/v1/study/getTeachPlanList";
+        HttpGet get = new HttpGet(teachPlanUrl);
+
+        try {
+            HttpResponse httpResponse = client.execute(get);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-        this.plans = plans;
+        return null;
+
+
     }
 
     /**
@@ -543,97 +1025,77 @@ public class APIController {
      * @param courseId http://course.njcedu.com/Servlet/recordStudy.svl?lCourseId=1286&lSchoolId=539&strStartTime=0
 
      **/
-    public void watchVideo(String courseId)  {
-        //数据准备
-        getCourseWareCookie(courseId);
-        //解决看视频太慢的问题
-//        Thread.sleep(30000);
-        //支持秒刷的业务逻辑 将代码迁移出去
-//        String url = "http://course.njcedu.com/Servlet/recordStudy.svl?lCourseId=" + courseId +
-//                "&lSchoolId=" + this.schoolCodeMap.get(this.loginDomain) + "&strStartTime=0";
-//        HttpClientUtil.getResByUrlAndCookie(url, null , getCookieByMap(cookieMap), false);
+//    public void watchVideo(String courseId)  {
+//        //数据准备
+//        getCourseWareCookie(courseId);
+//        //解决看视频太慢的问题
+////        Thread.sleep(30000);
+//        //支持秒刷的业务逻辑 将代码迁移出去
+////        String url = "http://course.njcedu.com/Servlet/recordStudy.svl?lCourseId=" + courseId +
+////                "&lSchoolId=" + this.schoolCodeMap.get(this.loginDomain) + "&strStartTime=0";
+////        HttpClientUtil.getResByUrlAndCookie(url, null , getCookieByMap(cookieMap), false);
+//
+//        return;
+//
+//    }
 
-        return;
+//    public String getCookieByMap(HashMap<String, String> cookieMap) {
+//        StringBuffer cookieStr = new StringBuffer();
+//        if (cookieMap != null && cookieMap.size() != 0) {
+//            for (Map.Entry<String, String> entry : cookieMap.entrySet()) {
+//                String key = entry.getKey();
+//                String value = entry.getValue();
+//                cookieStr.append(key + "=" + value + ";");
+//            }
+//        }
+//        return cookieStr.toString();
+//    }
 
-    }
+//    public String setSchoolToken(String schoolToken){
+////            cookieMap.put(CookieConstant.SCHOOL_TOKEN , schoolToken);
+//            return null;
+//    }
 
-    public String getCookieByMap(HashMap<String, String> cookieMap) {
-        StringBuffer cookieStr = new StringBuffer();
-        if (cookieMap != null && cookieMap.size() != 0) {
-            for (Map.Entry<String, String> entry : cookieMap.entrySet()) {
-                String key = entry.getKey();
-                String value = entry.getValue();
-                cookieStr.append(key + "=" + value + ";");
-            }
-        }
-        return cookieStr.toString();
-    }
+//    public String getCookie(){
+//        return this.getCookieByMap(this.cookieMap);
+//    }
 
-    public String setSchoolToken(String schoolToken){
-            cookieMap.put(CookieConstant.SCHOOL_TOKEN , schoolToken);
-            return null;
-    }
-
-    public String getCookie(){
-        return this.getCookieByMap(this.cookieMap);
-    }
-
-    public void getCourseWareCookie(String courseId) {
+    /**
+     * 看视频前置需要获取cookie
+     */
+    public void watchVideoBefore(String courseId){
         String url = "http://course.wnssedu.com/rest/v1/coursestudy/setCourseCookie";
-        HashMap<String,String> valueMap = new HashMap<String, String>();
-        valueMap.put("lCoursewareId" , courseId);
-        String respAndCookie = HttpClientUtil.postResByUrlAndCookie(url , getCookie() , valueMap , true );
+        HttpPost post = new HttpPost(url);
+        post.addHeader(new BasicHeader("Content-Type","application/x-www-form-urlencoded;charset=UTF-8"));
+        post.addHeader(new BasicHeader("Referer","http://sdnu.wnssedu.com"));
 
-        if(respAndCookie.split("#").length >=2){
-            rebuildCookieMap(respAndCookie.split("#")[1]);
+        List<NameValuePair> nvps = new ArrayList<>();
+        nvps.add(new BasicNameValuePair("lCoursewareId" , courseId));
+
+        try {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return ;
+        } catch (IOException e) {
+            e.printStackTrace();
         }
+        return ;
     }
+//    public void getCourseWareCookie(String courseId) {
+//        String url = "http://course.wnssedu.com/rest/v1/coursestudy/setCourseCookie";
+//        HashMap<String,String> valueMap = new HashMap<String, String>();
+//        valueMap.put("lCoursewareId" , courseId);
+//        String respAndCookie = HttpClientUtil.postResByUrlAndCookie(url , getCookie() , valueMap , true );
+//
+//        if(respAndCookie.split("#").length >=2){
+////            rebuildCookieMap(respAndCookie.split("#")[1]);
+//        }
+//    }
 
-    private void rebuildCookieMap(String cookie) {
-        //remove Path=/ HttpOnly Domain=njcedu.com
-        cookie = cookie.replaceAll("Path=/", "")
-                .replaceAll("HttpOnly", "")
-                .replaceAll("Domain=njcedu.com", "")
-                .replaceAll("Domain=wnssedu.com" , "")
-                .replaceAll(" Domain","")
-                .replaceAll(";;;", ";;")
-                .replaceAll(";;", ";")
-                .replaceAll(";", "")
-                .replaceAll("  ", ";");
-        String[] nameValuePair = cookie.split(";");
-        if (nameValuePair != null && nameValuePair.length > 0) {
-            for (String nameValue : nameValuePair) {
-                if(nameValue.contains("cpwd")){
-                    continue;
-                }
-                if (nameValue != null && nameValue.length() > 0) {
-                    //luserid=44670010423
-                    String key = nameValue.split("=")[0].trim();
-                    String value = nameValue.split("=")[1];
-                    cookieMap.put(key, value);
-                }
-
-            }
-        }
-        //remove cpwd key value
-        if(cookieMap.containsKey("cpwd")){
-            cookieMap.remove("cpwd");
-        }
-
-        if(cookieMap.get("JSESSIONID") != null
-                && cookieMap.get("JSESSIONID").contains(" ")){
-            String splitedJession = cookieMap.get("JSESSIONID").split(" ")[0];
-            cookieMap.put("JSESSIONID" , splitedJession);
-        }
-    }
 
 }
 
-class CookieConstant {
-    public static String COOKIE = "Cookie";
-    public static String SCHOOL_TOKEN = "schoolToken";
-
-}
 
 
 

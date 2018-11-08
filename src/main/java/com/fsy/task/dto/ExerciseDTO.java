@@ -1,4 +1,4 @@
-package com.fsy.task.dto.ResultDTO;
+package com.fsy.task.dto;
 
 
 import lombok.*;
