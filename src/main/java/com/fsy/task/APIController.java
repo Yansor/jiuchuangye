@@ -7,6 +7,7 @@ import com.fsy.task.config.WebHeader;
 import com.fsy.task.domain.User;
 import com.fsy.task.domain.QuestionOption;
 import com.fsy.task.dto.*;
+import com.fsy.task.exception.AppException;
 import com.fsy.task.util.MD5Util;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
@@ -92,9 +93,7 @@ public class APIController {
         cdo = parseLoginXml(loginXml);
 
         //二次授权 获取schoolToken token
-        String resp = secondAuth();
-
-        System.out.println( "应该返回 callback({res:1}) ， 二次登录授权 ,实际  " + resp);
+        secondAuth();
 
         String teachPlanJson = getTeachPlansJson();
         this.plans = parseTeachPlanJson(teachPlanJson);
@@ -109,11 +108,80 @@ public class APIController {
 
         ExamListDto examListDto = JSONObject.parseObject(examListJson , ExamListDto.class);
 
-        //nStart 2是已结束 1是进行中
-        exams = examListDto.getResponse().getCdosUserExaminList()
-                .stream().filter((ExamDto examDto)->{return "1".equals(examDto.getNStart());}).collect(Collectors.toList());
+        //nStart 2是已结束 1是进行中 暂时不做
+//        exams = examListDto.getResponse().getCdosUserExaminList()
+//                .stream().filter((ExamDto examDto)->{return "1".equals(examDto.getNStart());}).collect(Collectors.toList());
 
-        return;
+//        boolean isCanDoExam = canDoExam();
+//        String examBeforeStr = doExamBefore();
+//        doExam();
+    }
+
+    private String doExamBefore() {
+        String url = baseUrl + "/student/prese/examin/handleTrans.cdo?strServiceName=StudentExminService&strTransName=doAnswer";
+        return null;
+    }
+
+    private boolean canDoExam(String lExaminId) {
+        String url = baseUrl + "/student/rest/v1/study/isCanDoExamin";
+        HttpPost post = new HttpPost(url);
+        post.addHeader(WebHeader.USERAGENT_KEY , WebHeader.USERAGENT_VALUE);
+        post.addHeader(WebHeader.Refer_Key , "http://sdnu.wnssedu.com/studen…m?nExaminType=0&lId=2400000004");
+        post.addHeader(WebHeader.CONTENTTYPE_KEY , WebHeader.CONTENTTYPE_VALUE);
+
+        List<NameValuePair> nvps = new ArrayList<>();
+        nvps.add(new BasicNameValuePair("lExaminId" , lExaminId));
+        nvps.add(new BasicNameValuePair("nExaminType" , "0" ));
+
+        try {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            CommonDto commonDto = JSONObject.parseObject(respStr , CommonDto.class);
+            return commonDto.getReturnAlias().getNCode() == 0;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return false;
+
+
+
+    }
+
+    private String doExam(String lExaminId ,String planId) {
+        String url = "http://sdnu.wnssedu.com/student/prese/examin/handleTrans.cdo?strServiceName=StudentExminService&strTransName=commitPager";
+        HttpPost post = new HttpPost(url);
+        post.addHeader(WebHeader.USERAGENT_KEY , WebHeader.USERAGENT_VALUE);
+        post.addHeader(WebHeader.Refer_Key , "http://sdnu.wnssedu.com/student/prese/examin/pager.htm?lId=2400000004&nExaminType=0");
+        post.addHeader(WebHeader.CONTENTTYPE_KEY , WebHeader.CONTENTTYPE_VALUE);
+
+        List<NameValuePair> nvps = new ArrayList<>();
+        String postParam = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "\n" +
+                "<CDO>\n" +
+                "  <STRF N=\"strServiceName\" V=\"StudentExminService\"/>\n" +
+                "  <STRF N=\"strTransName\" V=\"commitPager\"/>\n" +
+                "  <LF N=\"lSchoolId\" V=\""+cdo.getLSchoolId()+"\"/>\n" +
+                "  <LF N=\"lUserId\" V=\""+cdo.getLId()+"\"/>\n" +
+                "  <LF N=\"lExaminId\" V=\""+lExaminId+"\"/>\n" + //2400000004
+                "  <LF N=\"lPlanId\" V=\""+planId+"\"/>\n" +      //2400000005
+                "  <LF N=\"nExaminType\" V=\"0\"/>\n" +
+                "  <STRF N=\"strAnswer1\" V=\"\"/>\n" +
+                "  <NF N=\"nCommitType\" V=\"1\"/>\n" +
+                "  <STRF N=\"strToken\" V=\"\"/>\n" +
+                "</CDO>\n";
+        nvps.add(new BasicNameValuePair("$$CDORequest$$" , postParam));
+        post.setEntity(new UrlEncodedFormEntity(nvps, Charset.defaultCharset()));
+
+        try {
+            HttpResponse httpResponse = client.execute(post);
+            HttpEntity httpEntity = httpResponse.getEntity();
+            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+            return respStr;
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
     }
 
     private String getExamListJson() {
@@ -283,15 +351,12 @@ public class APIController {
                                     for (int count = 0; count < needCount; count++) {
                                         //看视频接口
                                         String watchResp = doWatchV2(courseId);
-                                        System.out.println(watchResp);
                                         System.out.print(".");
                                     }
                                     System.out.println(blankStyle + blankStyle + blankStyle + sectionDTO.getStrName());
-
                                 }
                             }
                         }
-
                     }
                 }else {
                     System.out.println("看视频 " + plan.getStrPlanName() + " 已完成 ，自动跳过。");
@@ -1067,16 +1132,23 @@ public class APIController {
         String url = "http://course.wnssedu.com/rest/v1/coursestudy/setCourseCookie";
         HttpPost post = new HttpPost(url);
         post.addHeader(new BasicHeader("Content-Type","application/x-www-form-urlencoded;charset=UTF-8"));
-        post.addHeader(new BasicHeader("Referer","http://sdnu.wnssedu.com"));
+//        post.addHeader(new BasicHeader("Referer","http://sdnu.wnssedu.com"));
+        post.addHeader(new BasicHeader("Referer","http://course.wnssedu.com/newcourse/watch.htm?courseId=12&lSectionId=135&lVideoId=23&lSchoolId=37"));
 
         List<NameValuePair> nvps = new ArrayList<>();
         nvps.add(new BasicNameValuePair("lCoursewareId" , courseId));
 
+        post.setEntity(new UrlEncodedFormEntity(nvps , Charset.defaultCharset()));
         try {
             HttpResponse httpResponse = client.execute(post);
             HttpEntity httpEntity = httpResponse.getEntity();
-            String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
-            return ;
+            if(httpResponse.getStatusLine().getStatusCode() == 200 ){
+                String respStr = EntityUtils.toString(httpEntity ,Charset.defaultCharset());
+                return ;
+            }else{
+                throw new AppException("请求异常!状态码:"+httpResponse.getStatusLine().getStatusCode());
+            }
+
         } catch (IOException e) {
             e.printStackTrace();
         }

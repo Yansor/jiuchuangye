@@ -86,7 +86,6 @@ public class Main extends JFrame {
                         for(User user : userList){
                             String userPassStr = user.toString();
                             listDatas[index] = userPassStr;
-                            for(int a = 100 ; a < 125; a++)
                             dlm.addElement(userPassStr);
                             index++;
                         }
@@ -148,7 +147,13 @@ public class Main extends JFrame {
 
         if(!CollectionUtils.isEmpty(userList)){
             for(User user : userList){
-                new APIController(user.getUsername() , user.getPassword());
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        new APIController(user.getUsername() , user.getPassword());
+                    }
+                }).start();
+
             }
         }
     }
